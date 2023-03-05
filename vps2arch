@@ -26,7 +26,6 @@ else
 fi
 
 get_worldwide_mirrors() {
-	echo "https://mirror.pkgbuild.com"
 	_download 'https://www.archlinux.org/mirrorlist/?country=all&protocol=https&ip_version=4' | awk '/^## /{if ($2 == "Worldwide") { flag=1 } else { flag=0 } } /^#Server/ { if (flag) { sub(/\/\$repo.*/, ""); print $3 } }'
 }
 
@@ -45,11 +44,11 @@ download() {
 }
 
 download_and_extract_bootstrap() {
-	local sha1 filename
-	download iso/latest/sha1sums.txt | fgrep "$cpu_type.tar.gz" > "sha1sums.txt"
-	read -r sha1 filename < "sha1sums.txt"
+	local sha256 filename
+	download iso/latest/sha256sums.txt | fgrep "$cpu_type.tar.gz" > "sha256sums.txt"
+	read -r sha256 filename < "sha256sums.txt"
 	download "iso/latest/$filename" > "$filename"
-	sha1sum -c sha1sums.txt || exit 1
+	grep -v archlinux-bootstrap-x86_64.tar.gz sha256sums.txt | sha256sum -c || exit 1
 	tar -xpzf "$filename"
 	rm -f "$filename"
 	cp -L /etc/resolv.conf "/root.$cpu_type/etc"
@@ -91,14 +90,10 @@ configure_chroot() {
 		mv "/root.$cpu_type/etc/pacman.conf.bak" "/root.$cpu_type/etc/pacman.conf"
 	fi
 	chroot_exec 'pacman-key --init && pacman-key --populate archlinux'
-	chroot_exec 'pacman --needed --noconfirm -Sy awk'
+	# Update the archlinux-keyring in bootstrap
+	chroot_exec 'pacman --needed --noconfirm -Sy archlinux-keyring'
 	# Generate fstab
 	chroot_exec 'genfstab /mnt >> /etc/fstab'
-
-	if is_openvz && [ "$kernelver" '<' '2.6.32-042stab111.1' ]; then
-		# Use my repository for OpenVZ-patched systemd
-		sed -i 's;^#\[testing\]$;[tredaelli-systemd]\nServer = http://pkgbuild.com/~tredaelli/repo/systemd/$arch\n\n&;' "/root.$cpu_type/etc/pacman.conf"
-	fi
 }
 
 save_root_pass() {
@@ -121,7 +116,8 @@ delete_all() {
 }
 
 install_packages() {
-	local packages="base linux lvm2 openssh"
+	local packages="base openssh"
+	is_openvz || packages="$packages linux lvm2"
 	[ "$bootloader" != "none" ] && packages="$packages $bootloader"
 	# XXX Install gptdisk for syslinux. To be removed then FS#45029 will be closed
 	[ "$bootloader" = "syslinux" ] && packages="$packages gptfdisk"
@@ -131,7 +127,7 @@ install_packages() {
 		[ "$mountpoint" = "/" -a "$filesystem" = "xfs" ] && packages="$packages xfsprogs"
 	done < /proc/mounts
 	# Black magic!
-	"/root.$cpu_type/usr/lib"/ld-*.so --library-path "/root.$cpu_type/usr/lib" \
+	"/root.$cpu_type/usr/lib"/ld-*.so.2 --library-path "/root.$cpu_type/usr/lib" \
 		"/root.$cpu_type/usr/bin/chroot" "/root.$cpu_type" /usr/bin/pacstrap -M /mnt $packages
 	cp -L "/root.$cpu_type/etc/resolv.conf" /etc
 }
@@ -258,15 +254,8 @@ configure_network() {
 finalize() {
 	# OpenVZ hacks
 	if is_openvz; then
-		local kernelver
-		read -r _ _ kernelver _ < /proc/version
-		if [ "$kernelver" '>' '3.10' ]; then
-			# Virtuozzo 7 works with systemd, but it needs /etc/resolvconf/resolv.conf.d directory
-			mkdir -p /etc/resolvconf/resolv.conf.d
-		elif [ "$kernelver" '<' '2.6.32-042stab111.1' ]; then
-			# Use my repository for OpenVZ-patched systemd
-			sed -i 's;^#\[testing\]$;[tredaelli-systemd]\nServer = http://pkgbuild.com/~tredaelli/repo/systemd/$arch\n\n&;' /etc/pacman.conf
-		fi
+		# Virtuozzo 7 works with systemd, but it needs /etc/resolvconf/resolv.conf.d directory
+		mkdir -p /etc/resolvconf/resolv.conf.d
 	fi
 
 	# Enable SSH login for user root (#3)
